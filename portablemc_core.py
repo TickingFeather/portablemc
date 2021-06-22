@@ -32,6 +32,7 @@ from typing import Dict, Callable, Optional, Generator, Tuple, List, Union, Type
 from urllib import request as url_request, parse as url_parse
 from http.client import HTTPConnection, HTTPSConnection
 from json.decoder import JSONDecodeError
+import multiprocessing as mp
 from zipfile import ZipFile
 from uuid import uuid4
 from os import path
@@ -96,6 +97,9 @@ class CorePortableMC:
 
         self._version_manifest: Optional[VersionManifest] = None
         self._download_buffer: Optional[bytearray] = None
+
+        cpu_count = os.cpu_count()
+        self._download_workers: int = 1 if cpu_count is None else cpu_count
 
     # Generic methods
 
@@ -568,6 +572,39 @@ class CorePortableMC:
         setattr(owner, target, wrapper)
 
     # General utilities
+
+    def download_files(self, entries: 'List[DownloadEntry]'):
+
+        entries_count = len(entries)
+
+        if entries_count == 0:
+            return
+        elif entries_count == 1:
+            self.download_file_internal(entries[0], self.get_download_buffer())
+            return
+
+        workers_count = min(self._download_workers, entries_count)
+        workers = []
+
+        for _ in range(workers_count):
+            receive, send = mp.Pipe()
+            proc = mp.Process(target=self.download_file_process, args=(bytearray(256), receive))
+            workers.append((proc, send))
+            proc.start()
+
+        worker_idx = 0
+        for entry in entries:
+            _worker_proc, worker_send = workers[worker_idx]
+            worker_send.send(entry)
+            worker_idx += 1
+            if worker_idx >= workers_count:
+                worker_idx = 0
+
+    def download_file_process(self, buffer: bytearray, pipe: 'Optional[mp.connection.Connection]'):
+        pass
+
+    def download_file_internal(self, entry: 'DownloadEntry', buffer: bytearray):
+        pass
 
     def download_file(self,
                       entry: 'DownloadEntry', *,
