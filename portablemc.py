@@ -584,25 +584,29 @@ class CorePortableMC:
         workers_count = min(self._download_workers, entries_count)
         workers = []
 
-        for _ in range(workers_count):
-            receive, send = mp.Pipe()
-            proc = mp.Process(target=self.download_file_process, args=(bytearray(256), receive))
+        def process(wid: int, pipe: 'Optional[mp.connection.Connection]'):
+
+            process_entries = []  # type: List[Tuple[int, str, str]]
+            while True:
+                entry_info = pipe.recv()
+                if entry_info[0] == -1:
+                    break
+                process_entries.append(entry_info)
+
+            buffer = bytearray(65536)
+
+        for i in range(workers_count):
+            receive, send = mp.Pipe(False)
+            proc = mp.Process(target=process, args=(i, receive))
             workers.append((proc, send))
             proc.start()
 
-        worker_idx = 0
-        for entry in entries:
-            _worker_proc, worker_send = workers[worker_idx]
-            worker_send.send(entry)
-            worker_idx += 1
-            if worker_idx >= workers_count:
-                worker_idx = 0
+        for i, entry in enumerate(entries):
+            worker_send = workers[i % workers_count][1]
+            worker_send.send((i, entry.url, entry.dst))
 
-    def download_file_process(self, buffer: bytearray, pipe: 'Optional[mp.connection.Connection]'):
-        pass
-
-    def download_file_internal(self, entry: 'DownloadEntry', buffer: bytearray):
-        pass
+        for worker in workers:
+            worker[1].send((-1, None, None))
 
     def download_file(self,
                       entry: 'DownloadEntry', *,
