@@ -205,6 +205,7 @@ def register_arguments() -> ArgumentParser:
     parser.add_argument("--main-dir", help=_("args.main_dir"))
     parser.add_argument("--work-dir", help=_("args.work_dir"))
     parser.add_argument("--timeout", help=_("args.timeout"), type=float)
+    parser.add_argument("--machine", help=_("args.machine"), action="store_true")
     register_subcommands(parser.add_subparsers(title="subcommands", dest="subcommand"))
     return parser
 
@@ -1168,9 +1169,10 @@ messages = {
                      "saves, screenshots (and resources for legacy versions), it also store "
                      "runtime binaries and authentication. "
                      "This argument can be used or not by subcommand.",
-    "args.timeout": "Set a global timeout (in decimal seconds) that can be used by various requests done by the launcher or "
-                    "addons. A value of 0 is usually interpreted as an 'offline mode', this means that the launcher "
-                    "will try to use a cached copy of the requests' response.",
+    "args.timeout": "Set a global timeout (in decimal seconds) for network requests. A value of 0 is usually interpreted as an "
+                    "'offline mode', this means that the launcher will try to use a cached copy of the requests' response. "
+                    "Note that this argument is not guaranteed to be used by the launcher, it depends on the subcommand.",
+    "args.machine": "Use this flag to enable machine-mode outputs, such outputs are much easier to parse.",
     # Args search
     "args.search": "Search for Minecraft versions.",
     "args.search.local": "Search only for local installed Minecraft versions.",
