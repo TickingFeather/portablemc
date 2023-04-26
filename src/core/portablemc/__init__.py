@@ -1674,7 +1674,7 @@ class LibrarySpecifier:
 
         ext_parts = s.rsplit("@", 1)
         if len(ext_parts) != 2:
-            ext_parts = [ext_parts, "jar"]
+            ext_parts = [ext_parts[0], "jar"]
 
         parts = ext_parts[0].split(":", 3)
         if len(parts) < 3:
