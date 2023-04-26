@@ -78,6 +78,8 @@ def test_library_specifier():
     assert spec.group == "foo.bar"
     assert spec.artifact == "baz"
     assert spec.version == "0.1.0"
+    assert spec.classifier is None
+    assert spec.extension == "jar"
     assert str(spec) == "foo.bar:baz:0.1.0"
     assert spec.jar_file_path() == "foo/bar/baz/0.1.0/baz-0.1.0.jar"
 
@@ -86,5 +88,15 @@ def test_library_specifier():
     assert spec.artifact == "baz"
     assert spec.version == "0.1.0"
     assert spec.classifier == "classifier"
+    assert spec.extension == "jar"
     assert str(spec) == "foo.bar:baz:0.1.0:classifier"
     assert spec.jar_file_path() == "foo/bar/baz/0.1.0/baz-0.1.0-classifier.jar"
+
+    spec = LibrarySpecifier.from_str("foo.bar:baz:0.1.0:classifier@txt")
+    assert spec.group == "foo.bar"
+    assert spec.artifact == "baz"
+    assert spec.version == "0.1.0"
+    assert spec.classifier == "classifier"
+    assert spec.extension == "txt"
+    assert str(spec) == "foo.bar:baz:0.1.0:classifier@txt"
+    assert spec.jar_file_path() == "foo/bar/baz/0.1.0/baz-0.1.0-classifier.txt"

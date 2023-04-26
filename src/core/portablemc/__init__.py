@@ -462,26 +462,24 @@ class Version:
                 # If some download metadata was found, we try to create an entry from it.
                 if lib_dl_meta is not None:
 
-                    lib_dl_path = lib_dl_meta.get("path")
+                    # If there is no url in a download meta, just ignore it (empty = no url).
+                    lib_dl_url = lib_dl_meta.get("url", "")
+                    if len(lib_dl_url):
 
-                    # It sometime happens that no download path is provided.
-                    if lib_dl_path is None:
-
-                        # In such case, we can guess the path from the URL (error if not present).
-                        lib_dl_url = lib_dl_meta.get("url")
-                        if lib_dl_url is None:
-                            raise ValueError("None of 'url' or 'path' fields are present in the download metadata.", lib_spec)
+                        # It sometime happens that no download path is provided.
+                        lib_dl_path = lib_dl_meta.get("path")
+                        if lib_dl_path is None:
+                            
+                            # For now, we only guess the path if the url is the official repository.
+                            if lib_dl_url.startswith(LIBRARIES_URL):
+                                lib_dl_path = lib_dl_url[len(LIBRARIES_URL):]
+                            else:
+                                # FIXME: In the future, support urls that are not from official repository.
+                                raise ValueError("The path can only be guess from the official repository.", lib_spec)
                         
-                        # For now, we only guess the path if the url is the official repository.
-                        if lib_dl_url.startswith(LIBRARIES_URL):
-                            lib_dl_path = lib_dl_url[len(LIBRARIES_URL):]
-                        else:
-                            # FIXME: In the future, support urls that are not from official repository.
-                            raise ValueError("The path can only be guess from the official repository.", lib_spec)
-                    
-                    # Here the path should not be none, because of raised errors.
-                    lib_path = path.join(self.context.libraries_dir, lib_dl_path)
-                    lib_dl_entry = DownloadEntry.from_meta(lib_dl_meta, lib_path, name=str(lib_spec))
+                        # Here the path should not be none, because of raised errors.
+                        lib_path = path.join(self.context.libraries_dir, lib_dl_path)
+                        lib_dl_entry = DownloadEntry.from_meta(lib_dl_meta, lib_path, name=str(lib_spec))
 
             # If we don't have a download entry, try to make one of the library specifier (only if version is set).
             if lib_dl_entry is None:
@@ -1661,25 +1659,39 @@ class BinaryNotFound(Exception):
 
 class LibrarySpecifier:
 
-    __slots__ = "group", "artifact", "version", "classifier"
+    __slots__ = "group", "artifact", "version", "classifier", "extension"
 
-    def __init__(self, group: str, artifact: str, version: str, classifier: "Optional[str]"):
+    def __init__(self, group: str, artifact: str, version: str, classifier: "Optional[str]", extension: str = "jar"):
         self.group = group
         self.artifact = artifact
         self.version = version
         self.classifier = classifier
+        self.extension = extension
     
     @classmethod
     def from_str(cls, s: str) -> "LibrarySpecifier":
-        """ Parse a library specifier string 'group:artifact:version[:classifier]'. """
-        parts = s.split(":", 3)
+        """ Parse a library specifier string 'group:artifact:version[:classifier][@extension]'. """
+
+        ext_parts = s.rsplit("@", 1)
+        if len(ext_parts) != 2:
+            ext_parts = [ext_parts, "jar"]
+
+        parts = ext_parts[0].split(":", 3)
         if len(parts) < 3:
             raise ValueError("Invalid library specifier.")
         else:
-            return LibrarySpecifier(parts[0], parts[1], parts[2], parts[3] if len(parts) == 4 else None)
+
+            return LibrarySpecifier(
+                parts[0], 
+                parts[1], 
+                parts[2], 
+                parts[3] if len(parts) == 4 else None,
+                ext_parts[1])
 
     def __str__(self) -> str:
-        return f"{self.group}:{self.artifact}:{self.version}" + ("" if self.classifier is None else f":{self.classifier}")
+        return f"{self.group}:{self.artifact}:{self.version}" + \
+            ("" if self.classifier is None else f":{self.classifier}") + \
+            ("" if self.extension == "jar" else f"@{self.extension}")
 
     def __repr__(self) -> str:
         return f"<LibrarySpecifier {self}>"
@@ -1689,9 +1701,13 @@ class LibrarySpecifier:
         Return the standard path to store the JAR file of this specifier, the path separator
         will always be forward slashes '/', because it's compatible with linux/mac/windows 
         and URL paths.\n
-        Specifier `com.foo.bar:artifact:version` gives `com/foo/bar/artifact/version/artifact-version.jar`.
+        Specifier `com.foo.bar:artifact:version:classifier@zip` gives `com/foo/bar/artifact/version/artifact-version-classifier.zip`.
         """
-        file_name = f"{self.artifact}-{self.version}" + ("" if self.classifier is None else f"-{self.classifier}") + ".jar"
+
+        file_name = f"{self.artifact}-{self.version}" + \
+            ("" if self.classifier is None else f"-{self.classifier}") + \
+            f".{self.extension}"
+        
         return "/".join([*self.group.split("."), self.artifact, self.version, file_name])
 
 
