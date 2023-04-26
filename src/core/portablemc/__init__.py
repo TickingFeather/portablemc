@@ -483,7 +483,7 @@ class Version:
 
             # If we don't have a download entry, try to make one of the library specifier (only if version is set).
             if lib_dl_entry is None:
-                lib_path_raw = lib_spec.jar_file_path()
+                lib_path_raw = lib_spec.file_path()
                 lib_path = path.join(self.context.libraries_dir, lib_path_raw)
                 if not path.isfile(lib_path):
                     # The official launcher seems to default to their repository, it will also allows us
@@ -1696,7 +1696,7 @@ class LibrarySpecifier:
     def __repr__(self) -> str:
         return f"<LibrarySpecifier {self}>"
 
-    def jar_file_path(self) -> str:
+    def file_path(self) -> str:
         """ 
         Return the standard path to store the JAR file of this specifier, the path separator
         will always be forward slashes '/', because it's compatible with linux/mac/windows 
