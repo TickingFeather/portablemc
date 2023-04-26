@@ -81,7 +81,7 @@ def test_library_specifier():
     assert spec.classifier is None
     assert spec.extension == "jar"
     assert str(spec) == "foo.bar:baz:0.1.0"
-    assert spec.jar_file_path() == "foo/bar/baz/0.1.0/baz-0.1.0.jar"
+    assert spec.file_path() == "foo/bar/baz/0.1.0/baz-0.1.0.jar"
 
     spec = LibrarySpecifier.from_str("foo.bar:baz:0.1.0:classifier")
     assert spec.group == "foo.bar"
@@ -90,7 +90,7 @@ def test_library_specifier():
     assert spec.classifier == "classifier"
     assert spec.extension == "jar"
     assert str(spec) == "foo.bar:baz:0.1.0:classifier"
-    assert spec.jar_file_path() == "foo/bar/baz/0.1.0/baz-0.1.0-classifier.jar"
+    assert spec.file_path() == "foo/bar/baz/0.1.0/baz-0.1.0-classifier.jar"
 
     spec = LibrarySpecifier.from_str("foo.bar:baz:0.1.0:classifier@txt")
     assert spec.group == "foo.bar"
@@ -99,4 +99,4 @@ def test_library_specifier():
     assert spec.classifier == "classifier"
     assert spec.extension == "txt"
     assert str(spec) == "foo.bar:baz:0.1.0:classifier@txt"
-    assert spec.jar_file_path() == "foo/bar/baz/0.1.0/baz-0.1.0-classifier.txt"
+    assert spec.file_path() == "foo/bar/baz/0.1.0/baz-0.1.0-classifier.txt"
