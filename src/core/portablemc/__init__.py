@@ -566,10 +566,24 @@ class Version:
                     os.chmod(exec_file, 0o777)
             self.dl.add_callback(finalize)
 
-    def download(self, *, progress_callback: 'Optional[Callable[[DownloadProgress], None]]' = None) -> 'DownloadReport':
-        """ Download all missing files computed in `prepare_` methods. """
-        return self.dl.download_files(progress_callback=progress_callback)
+    def prepare_post(self):
+        """
+        This function does nothing by default but can be overridden by
+        specialized implementations of `Version` in order to run code
+        after the the full prepared download list has been downloaded.
 
+        This function is part of the standard install process and must
+        be called by the frontend.
+        """
+
+    def download(self, *, progress_callback: 'Optional[Callable[[DownloadProgress], None]]' = None) -> 'DownloadReport':
+        """ 
+        Download all missing files computed in `prepare_` methods. This
+        method must not necessarily be called if you have a special
+        download method for your frontend, in such case you can manually
+        access `dl` and call `download_files` on it.
+        """
+        return self.dl.download_files(progress_callback=progress_callback)
 
     def install(self, *, jvm: bool = False) -> 'DownloadReport':
 
@@ -585,8 +599,9 @@ class Version:
         self.prepare_libraries()
         if jvm:
             self.prepare_jvm()
-
-        return self.download()
+        report = self.download()
+        self.prepare_post()
+        return report
 
     def start(self, opts: 'Optional[StartOptions]' = None):
         """ Faster method to start the version. This actually use `Start` class, however, you can use it directly. """

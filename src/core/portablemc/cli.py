@@ -522,6 +522,8 @@ def cmd_start(ns: Namespace, ctx: CliContext):
         # Only download if some downloads are needed.
         if version.dl.count and len(pretty_download(version.dl).fails):
             sys.exit(EXIT_DOWNLOAD_ERROR)
+        
+        version.prepare_post()
 
         if ns.dry:
             return
