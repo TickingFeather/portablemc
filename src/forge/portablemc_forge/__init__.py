@@ -1,13 +1,19 @@
 from argparse import ArgumentParser, Namespace
-from typing import Dict, List
+from typing import Dict, Set, Optional
+from zipfile import ZipFile
+from io import BytesIO
 from os import path
 import subprocess
+import shutil
+import json
 import sys
 import os
 
 from portablemc import Version, \
-    DownloadList, DownloadEntry, DownloadReport, \
+    LibrarySpecifier, \
+    DownloadEntry, \
     BaseError, \
+    replace_vars, \
     http_request, json_simple_request, Context
 
 
@@ -28,16 +34,7 @@ def load():
     def cmd_start(old, ns: Namespace, ctx: CliContext):
         try:
             return old(ns, ctx)
-        except ForgeInvalidMainDirectory:
-            pmc.print_task("FAILED", "start.forge.error.invalid_main_dir", done=True)
-            sys.exit(pmc.EXIT_FAILURE)
-        except ForgeInstallerFailed as err:
-            pmc.print_task("FAILED", f"start.forge.error.installer_{err.return_code}", done=True)
-            print("===================")
-            print(err.output)
-            print("===================")
-            sys.exit(pmc.EXIT_FAILURE)
-        except ForgeVersionNotFound as err:
+        except ForgeError as err:
             pmc.print_task("FAILED", f"start.forge.error.{err.code}", {"version": err.version}, done=True)
             sys.exit(pmc.EXIT_VERSION_NOT_FOUND)
 
@@ -45,10 +42,6 @@ def load():
     def new_version(old, ctx: CliContext, version_id: str) -> Version:
 
         if version_id.startswith("forge:"):
-
-            main_dir = path.dirname(ctx.versions_dir)
-            if main_dir != path.dirname(ctx.libraries_dir):
-                raise ForgeInvalidMainDirectory()
 
             game_version = version_id[6:]
             if not len(game_version):
@@ -78,26 +71,11 @@ def load():
                 # If the game version came from an alias, we know for sure that no forge
                 # version is currently supporting the latest release/snapshot.
                 if game_version_alias:
-                    raise ForgeVersionNotFound(ForgeVersionNotFound.MINECRAFT_VERSION_NOT_SUPPORTED, game_version)
+                    raise ForgeError(ForgeError.MINECRAFT_VERSION_NOT_SUPPORTED, game_version)
                 # Test if the user has given the full forge version
                 forge_version = game_version
 
-            installer = ForgeVersionInstaller(ctx, forge_version, prefix=ctx.ns.forge_prefix)
-
-            if installer.needed():
-
-                pmc.print_task("", "start.forge.resolving", {"version": forge_version})
-                installer.prepare()
-                pmc.print_task("OK", "start.forge.resolved", {"version": forge_version}, done=True)
-
-                installer.check_download(pmc.pretty_download(installer.dl))
-
-                pmc.print_task("", "start.forge.wrapper.running")
-                installer.install()
-                pmc.print_task("OK", "start.forge.wrapper.done", done=True)
-
-            pmc.print_task("INFO", "start.forge.consider_support", done=True)
-            return installer.version
+            return ForgeVersion(ctx, forge_version, prefix=ctx.ns.forge_prefix)
 
         return old(ctx, version_id)
 
@@ -110,19 +88,10 @@ def load():
         "start.forge.wrapper.running": "Running installer (can take few minutes)...",
         "start.forge.wrapper.done": "Forge installation done.",
         "start.forge.consider_support": "Consider supporting the forge project through https://www.patreon.com/LexManos/.",
-        "start.forge.error.invalid_main_dir": "The main directory cannot be determined, because version directory "
-                                              "and libraries directory must have the same parent directory.",
-        "start.forge.error.installer_1": "Invalid command to start forge installer wrapper (should not happen, contact "
-                                         "maintainers, this can also happen if the installer fails).",
-        "start.forge.error.installer_2": "Invalid main directory to start forge installer wrapper (should not happen, "
-                                         "contact maintainers).",
-        "start.forge.error.installer_3": "This forge installer is currently not supported.",
-        "start.forge.error.installer_4": "This forge installer is missing something to run (internal).",
-        "start.forge.error.installer_5": "This forge installer failed to install forge (internal).",
-        f"start.forge.error.{ForgeVersionNotFound.INSTALLER_NOT_FOUND}": "No installer found for forge {version}.",
-        f"start.forge.error.{ForgeVersionNotFound.MINECRAFT_VERSION_NOT_FOUND}": "Parent Minecraft version not found "
+        f"start.forge.error.{ForgeError.INSTALLER_NOT_FOUND}": "No installer found for forge {version}.",
+        f"start.forge.error.{ForgeError.MINECRAFT_VERSION_NOT_FOUND}": "Parent Minecraft version not found "
                                                                                  "{version}.",
-        f"start.forge.error.{ForgeVersionNotFound.MINECRAFT_VERSION_NOT_SUPPORTED}": "Minecraft version {version} is not "
+        f"start.forge.error.{ForgeError.MINECRAFT_VERSION_NOT_SUPPORTED}": "Minecraft version {version} is not "
                                                                                      "currently supported by forge."
     })
 
@@ -130,118 +99,182 @@ def load():
 class ForgeVersion(Version):
 
     def __init__(self, context: Context, forge_version: str, *, prefix: str = "forge"):
+        
         super().__init__(context, f"{prefix}-{forge_version}")
         self.forge_version = forge_version
+        
+        # These fields are used when the version is being installed.
+        self.forge_install_libraries = None
+        self.forge_install_processors = None
+        self.forge_install_data = None
+        self.forge_install_version_libraries = None
 
     def _validate_version_meta(self, version_id: str, version_dir: str, version_meta_file: str, version_meta: dict) -> bool:
         if version_id == self.id:
+            # TODO: Various checks for presence of libs.
             return True
         else:
             return super()._validate_version_meta(version_id, version_dir, version_meta_file, version_meta)
 
     def _fetch_version_meta(self, version_id: str, version_dir: str, version_meta_file: str) -> dict:
-        if version_id == self.id:
-            # If the underlying class call this for THIS version, it means that the version hasn't been installed yet.
-            # This should not happen if the installer has been run before.
-            raise ForgeVersionNotFound(ForgeVersionNotFound.NOT_INSTALLED, self.forge_version)
-        else:
-            return super()._fetch_version_meta(version_id, version_dir, version_meta_file)
-
-
-class ForgeVersionInstaller:
-
-    def __init__(self, context: Context, forge_version: str, *, prefix: str = "forge"):
-
-        # The real version object being installed by this installer.
-        self.version = ForgeVersion(context, forge_version, prefix=prefix)
-
-        self.version_dir = self.version.context.get_version_dir(self.version.id)
-        self.installer_file = path.join(self.version_dir, "installer.jar")
-        self.dl = DownloadList()
-        self.main_dir = None
-        self.jvm_exec = None
-
-        # Extract minecraft version from the full forge version
-        self.parent_version_id = forge_version[:max(0, forge_version.find("-")) or len(forge_version)]
-
-        # List of possible artifacts names-version, some versions (e.g. 1.7) have the minecraft
-        # version in suffix of the version in addition to the suffix.
-        self.possible_artifact_versions = [forge_version, f"{forge_version}-{self.parent_version_id}"]
-
-    def needed(self) -> bool:
-
-        """ Return True if this forge version needs to be installed. """
-
-        if not path.isfile(path.join(self.version_dir, f"{self.version.id}.json")):
-            # If the version's metadata is not found.
-            return True
-
-        local_artifact_path = path.join(self.version.context.libraries_dir, "net", "minecraftforge", "forge")
-        for possible_version in self.possible_artifact_versions:
-            for possible_classifier in (possible_version, f"{possible_version}-client"):
-                artifact_jar = path.join(local_artifact_path, possible_version, f"forge-{possible_classifier}.jar")
-                if path.isfile(artifact_jar):
-                    # If we found at least one valid forge artifact, the version is valid.
-                    return False
-
-        return True
-
-    def prepare(self):
-
-        # The main dir specific to forge, it needs to be
-        self.main_dir = path.dirname(self.version.context.versions_dir)
-        if path.isfile(self.main_dir) and not path.samefile(self.main_dir, path.dirname(self.version.context.libraries_dir)):
-            raise ForgeInvalidMainDirectory()
-
-        last_dl_entry = None
-        for possible_version in self.possible_artifact_versions:
-            installer_url = f"https://maven.minecraftforge.net/net/minecraftforge/forge/{possible_version}/forge-{possible_version}-installer.jar"
-            possible_entry = DownloadEntry(installer_url, self.installer_file, name=f"installer:{possible_version}")
-            if last_dl_entry is None:
-                last_dl_entry = possible_entry
-                self.dl.append(possible_entry)
-            else:
-                last_dl_entry.add_fallback(possible_entry)
-
-        parent_version = Version(self.version.context, self.parent_version_id)
-        parent_version.dl = self.dl
-        parent_version.prepare_meta()
-        parent_version.prepare_jar()
-        # If no JVM exec is set, download the default JVM for the parent MC version.
-        if self.jvm_exec is None:
-            parent_version.prepare_jvm()
-            self.jvm_exec = parent_version.jvm_exec
-
-    def download(self):
-
-        if self.main_dir is None:
-            raise ValueError()
-
-        self.check_download(self.dl.download_files())
-
-    def check_download(self, report: DownloadReport):
-        for entry, entry_fail in report.fails.items():
-            if entry.dst == self.installer_file:
-                raise ForgeVersionNotFound(ForgeVersionNotFound.INSTALLER_NOT_FOUND, self.version.forge_version)
-
-    def install(self):
-
-        if self.main_dir is None:
-            raise ValueError()
-
-        wrapper_jar_file = path.join(path.dirname(__file__), "wrapper", "target", "wrapper.jar")
-        wrapper_completed = subprocess.run([
-            self.jvm_exec,
-            "-cp", path.pathsep.join([wrapper_jar_file, self.installer_file]),
-            "portablemc.wrapper.Main",
-            self.main_dir,
-            self.version.id
-        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         
-        os.remove(self.installer_file)
+        if version_id != self.id:
+            return super()._fetch_version_meta(version_id, version_dir, version_meta_file)
+        
+        # Extract the game version from the forge version, we'll use
+        # it to add suffix to find the right forge version if needed.
+        game_version = self.forge_version.split("-", 1)[0]
 
-        if wrapper_completed.returncode != 0:
-            raise ForgeInstallerFailed(wrapper_completed.returncode, wrapper_completed.stdout)
+        # For some older game versions, some odd suffixes where used 
+        # for the version scheme.
+        suffixes = [""]
+        suffixes.extend({
+            "1.11":     ("-1.11.x",),
+            "1.10.2":   ("-1.10.0",),
+            "1.10":     ("-1.10.0",),
+            "1.9.4":    ("-1.9.4",),
+            "1.9":      ("-1.9.0", "-1.9"),
+            "1.8.9":    ("-1.8.9",),
+            "1.8.8":    ("-1.8.8",),
+            "1.8":      ("-1.8",),
+            "1.7.10":   ("-1.7.10", "-1710ls", "-new"),
+            "1.7.2":    ("-mc172",),
+        }.get(game_version, []))
+
+        # Iterate suffix and find the first install JAR that works.
+        for suffix in suffixes:
+            install_jar = request_install_jar(f"{self.forge_version}{suffix}")
+            if install_jar is not None:
+                break
+
+        if install_jar is None:
+            raise ForgeError(ForgeError.INSTALLER_NOT_FOUND, self.forge_version)
+
+        with install_jar:
+
+            # The install profiles comes in multiples forms:
+            # 
+            # >= 1.12.2-14.23.5.2851
+            #  There are two files, 'install_profile.json' which 
+            #  contains processors and shared data, and `version.json`
+            #  which is the raw version meta to be fetched.
+            #
+            # <= 1.12.2-14.23.5.2847
+            #  There is only an 'install_profile.json' with the version
+            #  meta stored in 'versionInfo' object. Each library have
+            #  two keys 'serverreq' and 'clientreq' that should be
+            #  removed when the profile is returned.
+
+            try:
+                info = install_jar.getinfo("install_profile.json")
+                with install_jar.open(info) as fp:
+                    install_profile = json.load(fp)
+            except KeyError:
+                raise ForgeError(ForgeError.INSTALL_PROFILE_NOT_FOUND, self.forge_version)
+
+            if "json" in install_profile:
+
+                # Forge versions since 1.12.2-14.23.5.2851
+                info = install_jar.getinfo(install_profile["json"].lstrip("/"))
+                with install_jar.open(info) as fp:
+                    version_meta = json.load(fp)
+
+                self.forge_install_version_libraries = version_meta["libraries"]
+                self.forge_install_processors = install_profile["processors"]
+                self.forge_install_data = {}
+                self.forge_install_libraries = {}
+            
+                # We fetch all libraries used to build artifacts, and
+                # we store each path to each library here.
+                for install_lib in install_profile["libraries"]:
+
+                    lib_name = install_lib["name"]
+                    lib_spec = LibrarySpecifier.from_str(lib_name)
+                    lib_artifact = install_lib["downloads"]["artifact"]
+                    lib_path = path.join(self.context.libraries_dir, lib_spec.file_path())
+
+                    self.forge_install_libraries[lib_name] = lib_path
+                    
+                    if len(lib_artifact["url"]):
+                        lib_dl_entry = DownloadEntry.from_meta(lib_artifact, lib_path)
+                        if not path.isfile(lib_path) or (lib_dl_entry.size is not None and path.getsize(lib_path) != lib_dl_entry.size):
+                            self.dl.append(lib_dl_entry)
+                    else:
+                        # The lib should be stored inside the JAR file, under maven/ directory.
+                        zip_extract_file(install_jar, f"maven/{lib_spec.file_path()}", lib_path)
+
+                # Just keep the 'client' values.
+                for data_key, data_val in install_profile["data"].items():
+                    self.forge_install_data[data_key] = data_val["client"]
+                
+            else: 
+
+                # Forge versions before 1.12.2-14.23.5.2847
+                version_meta = install_profile.get("versionInfo")
+                if version_meta is None:
+                    raise ForgeError(ForgeError.VERSION_META_NOT_FOUND, self.forge_version)
+                
+                # Older versions have non standard keys for libraries.
+                for version_lib in version_meta["libraries"]:
+                    if "serverreq" in version_lib:
+                        del version_lib["serverreq"]
+                    if "clientreq" in version_lib:
+                        del version_lib["clientreq"]
+                    if "checksums" in version_lib:
+                        del version_lib["checksums"]
+                
+                # For "old" installers, that have an "install" section.
+                jar_entry_path = install_profile["install"]["filePath"]
+                jar_spec = LibrarySpecifier.from_str(install_profile["install"]["path"])
+
+                # Here we copy the forge jar stored to libraries.
+                jar_path = path.join(self.context.libraries_dir, jar_spec.file_path())
+                zip_extract_file(install_jar, jar_entry_path, jar_path)
+
+            version_meta["id"] = version_id
+            return version_meta
+    
+    def prepare_libraries(self, *, predicate = None):
+
+        # When installing, we opt-out the libraries that have no URL,
+        # because these will be generated by just after the download
+        # and we don't want errors if they are not present.
+        if self.forge_install_libraries is not None:
+            self.version_meta["libraries"] = [
+                lib for lib in self.version_meta["libraries"] if lib.get("downloads")
+            ]
+
+        return super().prepare_libraries(predicate=predicate)
+
+    def prepare_post(self) -> None:
+
+        super().prepare_post()
+
+        # If the modern installer need to be ran.
+        if self.install_lib_paths is not None:
+
+            if len(self.install_processors) and self.jvm_exec is None:
+                raise ForgeError(ForgeError.REQUIRES_JVM, self.forge_version)
+
+            def replace_install_vars(txt: str) -> str:
+                # Replace the pattern [lib name] with lib path.
+                if txt[0] == "[" and txt[-1] == "]":
+                    return self.install_lib_paths[txt[1:-1]]
+                # Fallback to a standard 
+                return replace_vars(txt, self.install_data)
+
+            for processor in self.install_processors:
+
+                jar_name = processor["jar"]
+                jar_path = self.install_lib_paths[jar_name]
+                classpath = [self.install_lib_paths[lib_name] for lib_name in processor.get("classpath", [])]
+                args = [replace_install_vars(arg) for arg in processor.get("args", [])]
+
+                all_args = [self.jvm_exec, "-cp", path.pathsep.join(classpath), "-jar", jar_path, *args]
+                process = subprocess.run(all_args)
+
+                print(f"{all_args}: {process}")
+                
 
 
 # Forge API
@@ -251,17 +284,22 @@ def request_promo_versions() -> Dict[str, str]:
     return raw["promos"]
 
 
-def request_maven_versions() -> List[str]:
+def request_maven_versions() -> Optional[Set[str]]:
 
     status, raw = http_request("https://maven.minecraftforge.net/net/minecraftforge/forge/maven-metadata.xml", "GET", headers={
         "Accept": "application/xml"
     })
 
-    text = raw.decode()
+    if status != 200:
+        return None
 
-    versions = []
+    text = raw.decode()
+    versions = set()
     last_idx = 0
 
+    # It's not really correct to parse XML like this, but I find this
+    # acceptable since the schema is well known and it should be a
+    # little bit easier to do thing like this.
     while True:
         start_idx = text.find("<version>", last_idx)
         if start_idx == -1:
@@ -269,30 +307,42 @@ def request_maven_versions() -> List[str]:
         end_idx = text.find("</version>", start_idx + 9)
         if end_idx == -1:
             break
-        versions.append(text[(start_idx + 9):end_idx])
+        versions.add(text[(start_idx + 9):end_idx])
         last_idx = end_idx + 10
 
     return versions
 
 
+def request_install_jar(version: str) -> Optional[ZipFile]:
+    status, raw = http_request(f"https://maven.minecraftforge.net/net/minecraftforge/forge/{version}/forge-{version}-installer.jar", "GET", headers={
+        "Accept": "application/java-archive"
+    })
+    return ZipFile(BytesIO(raw)) if status == 200 else None
+
+
+def zip_extract_file(zf: ZipFile, entry_path: str, dst_path: str):
+    """ 
+    Special function used to extract a specific file entry to a 
+    destination. This is different from ZipFile.extract because
+    the latter keep the full entry's path.
+    """
+    os.makedirs(path.dirname(dst_path), exist_ok=True)
+    with zf.open(entry_path) as src, open(dst_path, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+
+
 # Errors
 
-class ForgeInvalidMainDirectory(Exception):
-    pass
-
-
-class ForgeInstallerFailed(Exception):
-    def __init__(self, return_code: int, output: bytes):
-        self.return_code = return_code
-        self.output = output
-
-
-class ForgeVersionNotFound(BaseError):
+class ForgeError(BaseError):
 
     NOT_INSTALLED = "not_installed"
-    INSTALLER_NOT_FOUND = "installer_not_found"
     MINECRAFT_VERSION_NOT_FOUND = "minecraft_version_not_found"  # DEPRECATED
     MINECRAFT_VERSION_NOT_SUPPORTED = "minecraft_version_not_supported"
+
+    INSTALLER_NOT_FOUND = "installer_not_found"
+    INSTALL_PROFILE_NOT_FOUND = "install_profile_not_found"
+    VERSION_META_NOT_FOUND = "version_meta_not_found"
+    REQUIRES_JVM = "requires_jvm"
 
     def __init__(self, code: str, version: str):
         super().__init__(code)

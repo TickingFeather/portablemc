@@ -481,6 +481,11 @@ class Version:
                         lib_path = path.join(self.context.libraries_dir, lib_dl_path)
                         lib_dl_entry = DownloadEntry.from_meta(lib_dl_meta, lib_path, name=str(lib_spec))
 
+                    else:
+                        # FIXME: It seems that a download meta without an URL indicate
+                        # that the library should've been locally downloaded.
+                        pass
+
             # If we don't have a download entry, try to make one of the library specifier (only if version is set).
             if lib_dl_entry is None:
                 lib_path_raw = lib_spec.file_path()
@@ -1423,7 +1428,7 @@ class DownloadList:
         self.count += 1
         if entry.size is not None:
             self.size += entry.size
-
+    
     def reset(self):
         """ Clear the whole download list (entries, callbacks, total count and size). """
         self.entries.clear()
